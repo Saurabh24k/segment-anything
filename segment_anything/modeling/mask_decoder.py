@@ -23,6 +23,7 @@ class MaskDecoder(nn.Module):
         activation: Type[nn.Module] = nn.GELU,
         iou_head_depth: int = 3,
         iou_head_hidden_dim: int = 256,
+        num_attention_heads: int = 8,  # Added parameter for attention heads
     ) -> None:
         """
         Predicts masks given an image and prompt embeddings, using a
@@ -67,6 +68,14 @@ class MaskDecoder(nn.Module):
         self.iou_prediction_head = MLP(
             transformer_dim, iou_head_hidden_dim, self.num_mask_tokens, iou_head_depth
         )
+
+        # Cross-Resolution Attention Layer
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=transformer_dim,
+            num_heads=num_attention_heads,
+            batch_first=True
+        )
+
 
     def forward(
         self,
@@ -116,17 +125,26 @@ class MaskDecoder(nn.Module):
         sparse_prompt_embeddings: torch.Tensor,
         dense_prompt_embeddings: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Predicts masks. See 'forward' for more details."""
         # Concatenate output tokens
         output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight], dim=0)
-        output_tokens = output_tokens.unsqueeze(0).expand(sparse_prompt_embeddings.size(0), -1, -1)
-        tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)
+        output_tokens = output_tokens.unsqueeze(0)  # Shape (1, T_o, C)
+        tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)  # Shape (1, T_q, C)
 
-        # Expand per-image data in batch direction to be per-mask
-        src = torch.repeat_interleave(image_embeddings, tokens.shape[0], dim=0)
-        src = src + dense_prompt_embeddings
-        pos_src = torch.repeat_interleave(image_pe, tokens.shape[0], dim=0)
-        b, c, h, w = src.shape
+        # Add dense prompts to image embeddings
+        src = image_embeddings + dense_prompt_embeddings  # Shape (1, C, H, W)
+        pos_src = image_pe  # Shape (1, C, H, W)
+        b, c, h, w = src.shape  # b = 1
+
+        # Flatten image embeddings
+        src_flat = src.view(b, c, h * w).permute(0, 2, 1)  # Shape (1, N, C), N = H*W
+
+        # Apply cross-attention
+        attn_output, _ = self.cross_attention(
+            query=tokens,  # Shape (1, T_q, C)
+            key=src_flat,  # Shape (1, N, C)
+            value=src_flat  # Shape (1, N, C)
+        )
+        tokens = tokens + attn_output  # Residual connection
 
         # Run the transformer
         hs, src = self.transformer(src, pos_src, tokens)

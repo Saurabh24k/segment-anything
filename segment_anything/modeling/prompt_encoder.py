@@ -11,6 +11,8 @@ from torch import nn
 from typing import Any, Optional, Tuple, Type
 
 from .common import LayerNorm2d
+import torch.nn.functional as F
+from torch.nn import MultiheadAttention
 
 
 class PromptEncoder(nn.Module):
@@ -21,7 +23,11 @@ class PromptEncoder(nn.Module):
         input_image_size: Tuple[int, int],
         mask_in_chans: int,
         activation: Type[nn.Module] = nn.GELU,
+        num_attention_heads: int = 8,
+        num_hierarchy_levels: int = 2,  # Define the number of hierarchy levels
     ) -> None:
+        super().__init__()
+
         """
         Encodes prompts for input to SAM's mask decoder.
 
@@ -36,15 +42,20 @@ class PromptEncoder(nn.Module):
           activation (nn.Module): The activation to use when encoding
             input masks.
         """
-        super().__init__()
+
         self.embed_dim = embed_dim
         self.input_image_size = input_image_size
         self.image_embedding_size = image_embedding_size
         self.pe_layer = PositionEmbeddingRandom(embed_dim // 2)
 
-        self.num_point_embeddings: int = 4  # pos/neg point + 2 box corners
-        point_embeddings = [nn.Embedding(1, embed_dim) for i in range(self.num_point_embeddings)]
-        self.point_embeddings = nn.ModuleList(point_embeddings)
+        self.point_embeddings = nn.ModuleDict({
+            'positive': nn.Embedding(1, embed_dim),
+            'negative': nn.Embedding(1, embed_dim),
+        })
+        self.box_embeddings = nn.ModuleDict({
+            'box_corner1': nn.Embedding(1, embed_dim),
+            'box_corner2': nn.Embedding(1, embed_dim),
+        })
         self.not_a_point_embed = nn.Embedding(1, embed_dim)
 
         self.mask_input_size = (4 * image_embedding_size[0], 4 * image_embedding_size[1])
@@ -59,6 +70,20 @@ class PromptEncoder(nn.Module):
         )
         self.no_mask_embed = nn.Embedding(1, embed_dim)
 
+        # Multi-Headed Self-Attention Layer
+        self.attention_layer = MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_attention_heads,
+            batch_first=True  # To keep batch dimension first
+        )
+
+        # Hierarchical Encoding Layers
+        self.activation = activation()
+        self.num_hierarchy_levels = num_hierarchy_levels
+        self.hierarchical_layers = nn.ModuleList([
+            nn.Linear(self.embed_dim, self.embed_dim) for _ in range(self.num_hierarchy_levels)
+        ])
+        
     def get_dense_pe(self) -> torch.Tensor:
         """
         Returns the positional encoding used to encode point prompts,
@@ -85,19 +110,41 @@ class PromptEncoder(nn.Module):
             labels = torch.cat([labels, padding_label], dim=1)
         point_embedding = self.pe_layer.forward_with_coords(points, self.input_image_size)
         point_embedding[labels == -1] = 0.0
-        point_embedding[labels == -1] += self.not_a_point_embed.weight
-        point_embedding[labels == 0] += self.point_embeddings[0].weight
-        point_embedding[labels == 1] += self.point_embeddings[1].weight
+        # Replace direct weight access with embedding lookup
+        negative_embedding = self.point_embeddings['negative'](torch.zeros_like(labels, dtype=torch.long))
+        positive_embedding = self.point_embeddings['positive'](torch.zeros_like(labels, dtype=torch.long))
+        not_a_point_embedding = self.not_a_point_embed(torch.zeros_like(labels, dtype=torch.long))
+
+        # Apply embeddings based on labels
+        point_embedding = torch.where(
+            labels.unsqueeze(-1) == -1,
+            point_embedding + not_a_point_embedding,
+            point_embedding
+        )
+        point_embedding = torch.where(
+            labels.unsqueeze(-1) == 0,
+            point_embedding + negative_embedding,
+            point_embedding
+        )
+        point_embedding = torch.where(
+            labels.unsqueeze(-1) == 1,
+            point_embedding + positive_embedding,
+            point_embedding
+        )
+
         return point_embedding
 
     def _embed_boxes(self, boxes: torch.Tensor) -> torch.Tensor:
-        """Embeds box prompts."""
         boxes = boxes + 0.5  # Shift to center of pixel
         coords = boxes.reshape(-1, 2, 2)
         corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
-        corner_embedding[:, 0, :] += self.point_embeddings[2].weight
-        corner_embedding[:, 1, :] += self.point_embeddings[3].weight
+        corner_indices = torch.zeros((coords.shape[0], 2), dtype=torch.long, device=boxes.device)
+        corner_indices[:, 1] = 1  # Second corner
+        box_corner_embeddings = self.box_embeddings['box_corner1'](corner_indices[:, 0]) + \
+                                self.box_embeddings['box_corner2'](corner_indices[:, 1])
+        corner_embedding += box_corner_embeddings.unsqueeze(1)
         return corner_embedding
+
 
     def _embed_masks(self, masks: torch.Tensor) -> torch.Tensor:
         """Embeds mask inputs."""
@@ -123,7 +170,7 @@ class PromptEncoder(nn.Module):
             return 1
 
     def _get_device(self) -> torch.device:
-        return self.point_embeddings[0].weight.device
+        return next(self.parameters()).device
 
     def forward(
         self,
@@ -131,32 +178,43 @@ class PromptEncoder(nn.Module):
         boxes: Optional[torch.Tensor],
         masks: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Embeds different types of prompts, returning both sparse and dense
-        embeddings.
-
-        Arguments:
-          points (tuple(torch.Tensor, torch.Tensor) or none): point coordinates
-            and labels to embed.
-          boxes (torch.Tensor or none): boxes to embed
-          masks (torch.Tensor or none): masks to embed
-
-        Returns:
-          torch.Tensor: sparse embeddings for the points and boxes, with shape
-            BxNx(embed_dim), where N is determined by the number of input points
-            and boxes.
-          torch.Tensor: dense embeddings for the masks, in the shape
-            Bx(embed_dim)x(embed_H)x(embed_W)
-        """
         bs = self._get_batch_size(points, boxes, masks)
-        sparse_embeddings = torch.empty((bs, 0, self.embed_dim), device=self._get_device())
-        if points is not None:
-            coords, labels = points
-            point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
-            sparse_embeddings = torch.cat([sparse_embeddings, point_embeddings], dim=1)
-        if boxes is not None:
-            box_embeddings = self._embed_boxes(boxes)
-            sparse_embeddings = torch.cat([sparse_embeddings, box_embeddings], dim=1)
+        sparse_embeddings_list = []
+
+        for level in range(self.num_hierarchy_levels):
+            scale_factor = 1 / (2 ** level)
+            level_embeddings = torch.empty((bs, 0, self.embed_dim), device=self._get_device())
+
+            if points is not None:
+                coords, labels = points
+                scaled_coords = coords * scale_factor
+                point_embeddings = self._embed_points(scaled_coords, labels, pad=(boxes is None))
+                level_embeddings = torch.cat([level_embeddings, point_embeddings], dim=1)
+
+            if boxes is not None:
+                scaled_boxes = boxes * scale_factor
+                box_embeddings = self._embed_boxes(scaled_boxes)
+                level_embeddings = torch.cat([level_embeddings, box_embeddings], dim=1)
+
+            sparse_embeddings_list.append(level_embeddings)
+
+        # Concatenate embeddings from all levels
+        sparse_embeddings = torch.cat(sparse_embeddings_list, dim=1)
+
+        # Apply Self-Attention to Sparse Embeddings
+        if sparse_embeddings.size(1) > 0:
+            # Apply hierarchical encoding
+            for layer in self.hierarchical_layers:
+                sparse_embeddings = layer(sparse_embeddings)
+                sparse_embeddings = self.activation(sparse_embeddings)
+            # Apply Self-Attention to Sparse Embeddings
+            if sparse_embeddings.size(1) > 1:
+                attn_output, _ = self.attention_layer(
+                    sparse_embeddings,  # Query
+                    sparse_embeddings,  # Key
+                    sparse_embeddings   # Value
+                )
+                sparse_embeddings = sparse_embeddings + attn_output  # Residual Connection
 
         if masks is not None:
             dense_embeddings = self._embed_masks(masks)
@@ -166,6 +224,7 @@ class PromptEncoder(nn.Module):
             )
 
         return sparse_embeddings, dense_embeddings
+
 
 
 class PositionEmbeddingRandom(nn.Module):
@@ -181,6 +240,7 @@ class PositionEmbeddingRandom(nn.Module):
             "positional_encoding_gaussian_matrix",
             scale * torch.randn((2, num_pos_feats)),
         )
+
 
     def _pe_encoding(self, coords: torch.Tensor) -> torch.Tensor:
         """Positionally encode points that are normalized to [0,1]."""

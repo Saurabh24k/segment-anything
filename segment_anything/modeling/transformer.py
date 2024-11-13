@@ -20,7 +20,7 @@ class TwoWayTransformer(nn.Module):
         embedding_dim: int,
         num_heads: int,
         mlp_dim: int,
-        activation: Type[nn.Module] = nn.ReLU,
+        activation: Type[nn.Module] = nn.GELU,
         attention_downsample_rate: int = 2,
     ) -> None:
         """
