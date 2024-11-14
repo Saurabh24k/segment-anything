@@ -238,3 +238,17 @@ class Attention(nn.Module):
         out = self.out_proj(out)
 
         return out
+
+class Block(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4.0, qkv_bias=True, norm_layer=nn.LayerNorm, act_layer=nn.GELU, **kwargs):
+        super().__init__()
+        # Attention layers
+        self.norm1 = norm_layer(dim)
+        self.attn = Attention(dim, num_heads, **kwargs)
+        self.norm2 = norm_layer(dim)
+        self.mlp = MLPBlock(dim, int(dim * mlp_ratio), act_layer)
+
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x), self.norm1(x), self.norm1(x))  # Self-attention
+        x = x + self.mlp(self.norm2(x))  # Feed-forward network
+        return x
