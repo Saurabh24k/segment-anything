@@ -193,8 +193,10 @@ class Attention(nn.Module):
         embedding_dim: int,
         num_heads: int,
         downsample_rate: int = 1,
+        use_rel_pos: bool = False
     ) -> None:
         super().__init__()
+        self.use_rel_pos = use_rel_pos
         self.embedding_dim = embedding_dim
         self.internal_dim = embedding_dim // downsample_rate
         self.num_heads = num_heads
