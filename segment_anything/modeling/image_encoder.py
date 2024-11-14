@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Type
+from segment_anything.modeling.transformer import Block
+
 
 class ImageEncoderViT(nn.Module):
     def __init__(
