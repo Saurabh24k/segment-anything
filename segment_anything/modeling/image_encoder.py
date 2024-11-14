@@ -288,3 +288,14 @@ class PatchEmbed(nn.Module):
         # B C H W -> B H W C
         x = x.permute(0, 2, 3, 1)
         return x
+
+
+class LayerNorm2d(nn.Module):
+    def __init__(self, num_features, eps=1e-5):
+        super(LayerNorm2d, self).__init__()
+        self.layer_norm = nn.LayerNorm(num_features, eps=eps)
+
+    def forward(self, x):
+        # x has shape (batch, channels, height, width)
+        return self.layer_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
