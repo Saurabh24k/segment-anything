@@ -246,7 +246,7 @@ class Block(nn.Module):
         super().__init__()
         # Attention layers
         self.norm1 = norm_layer(dim)
-        self.attn = Attention(dim, num_heads, **kwargs)
+        self.attn = Attention(dim, num_heads)  # Only pass supported arguments here
         self.norm2 = norm_layer(dim)
         self.mlp = MLPBlock(dim, int(dim * mlp_ratio), act_layer)
 
