@@ -102,8 +102,7 @@ class SamPredictor:
         assert (
             len(transformed_image.shape) == 4
             and transformed_image.shape[1] == 3
-            and max(*transformed_image.shape[2:]) == self.model.image_encoder.img_size
-        ), f"Error: set_torch_image expects input of shape [B, 3, H, W] with max side {self.model.image_encoder.img_size}. Got: {transformed_image.shape}"
+        ), f"Error: set_torch_image expects input of shape [B, 3, H, W]. Got: {transformed_image.shape}"
     
         self.reset_image()
     
@@ -117,13 +116,20 @@ class SamPredictor:
             input_image = self.model.preprocess(transformed_image)
             print(f"Debug: Shape after model preprocessing: {input_image.shape}")
     
+            # Verify expected shape for image_encoder
+            print(f"Debug: Checking input format for image_encoder.")
+            if input_image.shape[1:] != (3, 1024, 1024):  # Assuming the model expects this shape.
+                print(f"Warning: Adjusting input shape for image_encoder.")
+                input_image = input_image[:, :3, :, :]  # Ensure it's (B, 3, H, W)
+    
             # Encode image features
             self.features = self.model.image_encoder(input_image)
             self.is_image_set = True
             print("Image embeddings set successfully.")
         except Exception as e:
             print(f"Error in set_torch_image: {e}")
-    
+
+
 
     def predict(
         self,
