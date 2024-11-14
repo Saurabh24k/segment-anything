@@ -39,7 +39,7 @@ class SamPredictor:
         """
         Calculates the image embeddings for the provided image, allowing
         masks to be predicted with the 'predict' method.
-    
+
         Arguments:
           image (np.ndarray): The image for calculating masks. Expects an
             image in HWC uint8 format, with pixel values in [0, 255].
@@ -49,29 +49,29 @@ class SamPredictor:
             "RGB",
             "BGR",
         ], f"image_format must be in ['RGB', 'BGR'], is {image_format}."
-    
+
         # Convert image format if necessary
         if image_format != self.model.image_format:
             image = image[..., ::-1]
-    
+
         # Debugging: Check the shape of the input image
         print(f"Debug: Original image shape (expected HWC): {image.shape}")
-    
+
         try:
             # Transform the image to the form expected by the model
             input_image = self.transform.apply_image(image)
             print(f"Debug: Transformed image shape (after resize): {input_image.shape}")
-    
+
             # Ensure input is of torch tensor type with channel-first format
             input_image_torch = torch.as_tensor(input_image, device=self.device)
             input_image_torch = input_image_torch.permute(2, 0, 1).contiguous()[None, :, :, :]
-    
+
             # Debugging: Check the shape of tensor input
             print(f"Debug: Tensor shape after permutation for model input: {input_image_torch.shape}")
-    
+
             # Set the processed torch image with original size for further processing
             self.set_torch_image(input_image_torch, image.shape[:2])
-    
+
         except ValueError as e:
             print(f"ValueError in setting image: {e}")
         except Exception as e:
@@ -81,31 +81,49 @@ class SamPredictor:
     def set_torch_image(
         self,
         transformed_image: torch.Tensor,
-        original_image_size: Tuple[int, ...],
+        original_image_size: Tuple[int, int],
     ) -> None:
         """
         Calculates the image embeddings for the provided image, allowing
         masks to be predicted with the 'predict' method. Expects the input
         image to be already transformed to the format expected by the model.
-
+    
         Arguments:
           transformed_image (torch.Tensor): The input image, with shape
             1x3xHxW, which has been transformed with ResizeLongestSide.
           original_image_size (tuple(int, int)): The size of the image
             before transformation, in (H, W) format.
         """
+        print(f"Debug: Entering set_torch_image")
+        print(f"Debug: Transformed image shape: {transformed_image.shape}")
+        print(f"Debug: Expected model input size: BCHW format")
+    
+        # Ensure the image matches the expected format
         assert (
             len(transformed_image.shape) == 4
             and transformed_image.shape[1] == 3
             and max(*transformed_image.shape[2:]) == self.model.image_encoder.img_size
-        ), f"set_torch_image input must be BCHW with long side {self.model.image_encoder.img_size}."
+        ), f"Error: set_torch_image expects input of shape [B, 3, H, W] with max side {self.model.image_encoder.img_size}. Got: {transformed_image.shape}"
+    
         self.reset_image()
-
+    
+        # Setting size attributes for further processing
         self.original_size = original_image_size
         self.input_size = tuple(transformed_image.shape[-2:])
-        input_image = self.model.preprocess(transformed_image)
-        self.features = self.model.image_encoder(input_image)
-        self.is_image_set = True
+        print(f"Debug: Original image size: {self.original_size}, Model input size: {self.input_size}")
+    
+        try:
+            # Run preprocessing through model’s preprocessing pipeline
+            input_image = self.model.preprocess(transformed_image)
+            print(f"Debug: Shape after model preprocessing: {input_image.shape}")
+    
+            # Encode image features
+            self.features = self.model.image_encoder(input_image)
+            self.is_image_set = True
+            print("Image embeddings set successfully.")
+        except Exception as e:
+            print(f"Error in set_torch_image: {e}")
+    
 
     def predict(
         self,
