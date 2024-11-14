@@ -78,56 +78,27 @@ class SamPredictor:
             print(f"Unexpected error in setting image: {e}")
 
     @torch.no_grad()
-    def set_torch_image(
-        self,
-        transformed_image: torch.Tensor,
-        original_image_size: Tuple[int, int],
-    ) -> None:
-        """
-        Calculates the image embeddings for the provided image, allowing
-        masks to be predicted with the 'predict' method. Expects the input
-        image to be already transformed to the format expected by the model.
-    
-        Arguments:
-          transformed_image (torch.Tensor): The input image, with shape
-            1x3xHxW, which has been transformed with ResizeLongestSide.
-          original_image_size (tuple(int, int)): The size of the image
-            before transformation, in (H, W) format.
-        """
-        print(f"Debug: Entering set_torch_image")
+    def set_torch_image(self, transformed_image: torch.Tensor, original_image_size: Tuple[int, int]) -> None:
+        print("Debug: Entering set_torch_image")
         print(f"Debug: Transformed image shape: {transformed_image.shape}")
-        print(f"Debug: Expected model input size: BCHW format")
-    
-        # Ensure the image matches the expected format
-        assert (
-            len(transformed_image.shape) == 4
-            and transformed_image.shape[1] == 3
-        ), f"Error: set_torch_image expects input of shape [B, 3, H, W]. Got: {transformed_image.shape}"
-    
-        self.reset_image()
-    
-        # Setting size attributes for further processing
+        
+        # Confirm expected input format for the model (BCHW)
+        if transformed_image.shape[0] != 1 or transformed_image.shape[1] != 3:
+            raise ValueError("set_torch_image expects a 4D tensor in the format [1, 3, H, W]")
+        
         self.original_size = original_image_size
         self.input_size = tuple(transformed_image.shape[-2:])
         print(f"Debug: Original image size: {self.original_size}, Model input size: {self.input_size}")
-    
+
+        # Pass through the model's preprocessing and encode the image
         try:
-            # Run preprocessing through model’s preprocessing pipeline
             input_image = self.model.preprocess(transformed_image)
-            print(f"Debug: Shape after model preprocessing: {input_image.shape}")
-    
-            # Verify expected shape for image_encoder
-            print(f"Debug: Checking input format for image_encoder.")
-            if input_image.shape[1:] != (3, 1024, 1024):  # Assuming the model expects this shape.
-                print(f"Warning: Adjusting input shape for image_encoder.")
-                input_image = input_image[:, :3, :, :]  # Ensure it's (B, 3, H, W)
-    
-            # Encode image features
             self.features = self.model.image_encoder(input_image)
+            print("Debug: Image encoding completed successfully.")
             self.is_image_set = True
-            print("Image embeddings set successfully.")
         except Exception as e:
             print(f"Error in set_torch_image: {e}")
+            raise
 
 
 
